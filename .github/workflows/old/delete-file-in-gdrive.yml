@@ -1,0 +1,48 @@
+name: Delete File in Google Drive
+
+on:
+  workflow_dispatch:
+
+jobs:
+  delete-file:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.9"
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install google-api-python-client google-auth google-auth-oauthlib google-auth-httplib2
+
+    - name: Delete file from Google Drive
+      env:
+        FILE_ID: "My_File_ID"
+      run: |
+        echo "${{ secrets.GDRIVE_CREDENTIALS }}" | base64 --decode > credentials.json
+        python <<EOF
+        from googleapiclient.discovery import build
+        from google.oauth2.service_account import Credentials
+
+        # Define variable file_id from FILE_ID
+        file_id = "${{ env.FILE_ID }}"
+
+        # Authenticate with Google Drive API
+        # scopes = ['https://www.googleapis.com/auth/drive']
+        credentials = Credentials.from_service_account_file('credentials.json')
+        # credentials = Credentials.from_service_account_file('credentials.json', scopes=scopes)
+        service = build('drive', 'v3', credentials=credentials)
+
+        try:
+            # Delete file
+            service.files().delete(fileId=file_id).execute()
+            print(f"File with ID {file_id} has been deleted successfully.")
+        except Exception as e:
+            print(f"An error occurred: {e}")
+        EOF
