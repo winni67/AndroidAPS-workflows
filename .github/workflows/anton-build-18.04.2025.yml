@@ -1,0 +1,127 @@
+name: Production Builds
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        type: string
+        description: 'Repository'
+        required: true
+        default: 'nightscout/AndroidAPS'
+      ref:
+        type: string
+        description: 'Ref / Branch'
+        required: true
+        default: 'master'
+      flavor:
+        type: string
+        description: 'App or wear'
+        required: true
+        default: 'app'
+      keyStoreContent:
+        type: string
+        description: 'Base64 encoded keystore file'
+        required: true
+      keyStorePassword:
+        type: string
+        description: 'Keystore password'
+        required: true
+      keyPassword:
+        type: string
+        description: 'Key password'
+        required: true
+      keyAlias:
+        type: string
+        description: 'Key alias'
+        required: true
+      uploadAsArtifact:
+        type: boolean
+        description: 'Upload as artifact'
+      googleDriveAccessToken:
+        type: string
+        description: 'Google Drive access token'
+      dropboxAccessToken:
+        type: string
+        description: 'Dropbox access token'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repo }}
+          ref: ${{ inputs.ref }}
+
+      - name: set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: 'gradle'
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Build with Gradle
+        run: ./gradlew ${{ inputs.flavor == 'wear' && 'wear' || 'app' }}:assembleFullRelease
+
+      - name: Setup build tool version variable
+        shell: bash
+        run: |
+          BUILD_TOOL_VERSION=$(ls /usr/local/lib/android/sdk/build-tools/ | tail -n 1)
+          echo "BUILD_TOOL_VERSION=$BUILD_TOOL_VERSION" >> $GITHUB_ENV
+          echo Last build tool version is: $BUILD_TOOL_VERSION
+
+      - name: Sign APK
+        uses: r0adkll/sign-android-release@v1
+        id: sign_app
+        with:
+          releaseDirectory: ${{ inputs.flavor == 'wear' && 'wear' || 'app' }}/build/outputs/apk/full/release
+          signingKeyBase64: ${{ inputs.keyStoreContent }}
+          keyStorePassword: ${{ inputs.keyStorePassword }}
+          alias: ${{ inputs.keyAlias }}
+          keyPassword: ${{ inputs.keyPassword }}
+        env:
+          # override default build-tools version (29.0.3) -- optional
+          # BUILD_TOOLS_VERSION: "35.0.2"
+          BUILD_TOOLS_VERSION: ${{ env.BUILD_TOOL_VERSION }}
+
+      - name: Get AAPS version
+        run: |
+          AAPS_VERSION=$(grep 'const val appVersion' buildSrc/src/main/kotlin/Versions.kt | awk -F'"' '{print $2}' )
+          echo "AAPS version: $AAPS_VERSION"
+          echo "AAPS_VERSION=$AAPS_VERSION" >> $GITHUB_ENV
+          echo "AAPS_APK_FILE=AndroidAPS${{ inputs.flavor == 'wear' && '-wear' || '' }}-$AAPS_VERSION.apk" >> $GITHUB_ENV
+          echo "AAPS APK file: $AAPS_APK_FILE"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        if: ${{ inputs.uploadAsArtifact == true }}
+        with:
+          name: 'AndroidAPS-$AAPS_VERSION'
+          path: ${{steps.sign_app.outputs.signedReleaseFile}}
+          retention-days: 1
+
+      - name: Upload to Dropbox
+        shell: bash
+        if: ${{ inputs.dropboxAccessToken != '' }}
+        run: |
+          curl -X POST https://content.dropboxapi.com/2/files/upload --fail \
+            --header "Authorization: Bearer ${{ inputs.dropboxAccessToken }}" \
+            --header "Dropbox-API-Arg: {\"path\":\"/${{env.AAPS_APK_FILE}}\"}" \
+            --header "Content-Type: application/octet-stream" \
+            --data-binary @${{steps.sign_app.outputs.signedReleaseFile}}
+
+      - name: Upload to Google Drive
+        shell: bash
+        if: ${{ inputs.googleDriveAccessToken != '' }}
+        run: |
+          curl -X POST -L --fail \
+            --header "Authorization: Bearer ${{ inputs.googleDriveAccessToken }}" \
+            -F "metadata={ \
+              \"name\":\"${{env.AAPS_APK_FILE}}\" \
+              };type=application/json;charset=UTF-8" \
+            -F "file=@${{steps.sign_app.outputs.signedReleaseFile}}" \
+          "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart"
